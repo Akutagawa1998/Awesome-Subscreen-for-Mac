@@ -57,8 +57,8 @@ class WellnessService:
         sleeps, sources, invalid = {}, set(), 0
         asleep = {'1','3','4','5','asleep','asleep (unspecified)','asleep unspecified',
                   'asleep (core)','asleep (deep)','asleep (rem)','core','deep','rem',
-                  '睡眠','睡着','已入睡','睡眠（未指定）','睡眠（核心）','睡眠（深度）',
-                  '睡眠（快速眼动）','核心睡眠','深度睡眠','快速眼动睡眠'}
+                  '睡眠','睡眠时间','睡着','已入睡','睡眠（未指定）','睡眠（核心）','睡眠（深度）',
+                  '睡眠（快速眼动）','核心睡眠','深度睡眠','快速眼动睡眠','快速动眼睡眠'}
         ignored_sleep = {'0','2','in bed','inbed','awake','卧床','卧床时间','清醒'}
         for row in rows:
             try:

@@ -145,3 +145,13 @@ class HealthTests(unittest.TestCase):
         self.assertNotIn('sleepHours',r['metrics'])
         self.assertTrue(r['warnings'])
         with self.assertRaises(ValueError):self.service.import_data({'schemaVersion':2,'samples':[]})
+
+    def test_chinese_shortcut_sleep_labels_keep_rem_and_ignore_time_in_bed(self):
+        rows=[{'kind':'sleep','value':label,'at':f'2025-01-01T{start}:00:00Z',
+               'end':f'2025-01-01T{end}:00:00Z','source':'Example Watch'}
+              for label,start,end in [('睡眠时间','00','02'),('核心睡眠','00','01'),
+                                      ('深度睡眠','01','02'),('快速动眼睡眠','02','03'),
+                                      ('卧床时间','00','04')]]
+        r=self.service.import_data({'schemaVersion':2,'samples':rows})
+        self.assertEqual(r['metrics']['sleepHours']['value'],3)
+        self.assertEqual(r['warnings'],[])
