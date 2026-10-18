@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -105,6 +106,85 @@ class HealthTests(unittest.TestCase):
         f.write_text(json.dumps(self.sample))
         self.assertEqual(self.service.read()['metrics']['heartRate']['value'],83)
         self.service.disconnect();self.assertFalse(self.service.read()['connected'])
+
+    def test_folder_combines_metrics_and_skips_invalid_matching_files(self):
+        folder=self.root/'sync';folder.mkdir()
+        (folder/'wokyis-health.json').write_text(json.dumps(self.sample))
+        (folder/'wokyis-health-hrv.json').write_text(json.dumps({'schemaVersion':2,'samples':[
+            {'kind':'hrv','value':'0.045','unit':'s','at':'2025-01-01T10:00:00Z','source':'Example Watch'}]}))
+        (folder/'wokyis-health-old.json').write_text('{')
+        (folder/'wokyis-health-empty.json').write_text(json.dumps({'schemaVersion':2,'samples':[]}))
+        # Neither unrelated JSON, nested files nor symlinks may supply metrics.
+        unrelated={'restingHeartRate':{'value':61,'at':'2025-01-01T10:00:00Z'}}
+        (folder/'other.json').write_text(json.dumps(unrelated))
+        nested=folder/'nested';nested.mkdir()
+        (nested/'wokyis-health-resting.json').write_text(json.dumps(unrelated))
+        external=self.root/'external.json';external.write_text(json.dumps(unrelated))
+        (folder/'wokyis-health-link.json').symlink_to(external)
+        result=self.service.configure({'path':str(folder)})
+        self.assertEqual(result['mode'],'folder')
+        self.assertEqual(result['metrics']['heartRate']['value'],72)
+        self.assertEqual(result['metrics']['hrv']['value'],45)
+        self.assertNotIn('restingHeartRate',result['metrics'])
+        self.assertTrue(result['connected'])
+        self.assertIn('3 个健康同步文件',result['warnings'][0])
+        (folder/'wokyis-health-resting.json').write_text(json.dumps(unrelated))
+        self.assertEqual(self.service.read()['metrics']['restingHeartRate']['value'],61)
+
+    def test_folder_uses_sample_time_instead_of_file_mtime(self):
+        folder=self.root/'sync';folder.mkdir()
+        older=folder/'wokyis-health.json';newer=folder/'wokyis-health-2.json'
+        older.write_text(json.dumps(self.sample))
+        newer.write_text(json.dumps({'schemaVersion':2,'samples':[
+            {'kind':'heartRate','value':'83','unit':'bpm','at':'2025-01-01T07:00:00-04:00','source':'Example Watch'}]}))
+        os.utime(older,(2000000000,2000000000));os.utime(newer,(1,1))
+        result=self.service.configure({'path':str(folder)})
+        self.assertEqual(result['metrics']['heartRate']['value'],83)
+        self.assertEqual(result['metrics']['heartRate']['at'],'2025-01-01T11:00:00+00:00')
+
+    def test_folder_merges_sleep_intervals_across_files_without_device_double_count(self):
+        folder=self.root/'sync';folder.mkdir()
+        def sleep(start,end,source):
+            return {'kind':'sleep','value':'Asleep','at':f'2025-01-01T{start}:00:00Z',
+                    'end':f'2025-01-01T{end}:00:00Z','source':source}
+        first={'schemaVersion':2,'samples':[sleep('00','04','Example Watch')]}
+        second={'schemaVersion':2,'samples':[sleep('00','04','Example Watch'),
+            sleep('04','08','Example Watch'),sleep('00','08','Example Band')]}
+        (folder/'wokyis-health-sleep.json').write_text(json.dumps(first))
+        (folder/'wokyis-health-sleep-2.json').write_text(json.dumps(second))
+        result=self.service.configure({'path':str(folder)})
+        self.assertEqual(result['metrics']['sleepHours']['value'],8)
+        self.assertEqual(result['metrics']['sleepHours']['at'],'2025-01-01T08:00:00+00:00')
+        self.assertEqual(result['warnings'],[])
+
+    def test_empty_or_invalid_folder_cannot_replace_working_source(self):
+        self.service.import_data(self.sample)
+        folder=self.root/'sync';folder.mkdir()
+        with self.assertRaisesRegex(ValueError,'没有可用健康数据'):
+            self.service.configure({'path':str(folder)})
+        (folder/'wokyis-health.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError,'没有可用健康数据'):
+            self.service.configure({'path':str(folder)})
+        self.assertEqual(self.service.read()['metrics']['heartRate']['value'],72)
+        self.assertEqual(self.service.read()['mode'],'import')
+
+    def test_folder_limits_file_count_total_bytes_and_sample_count(self):
+        folder=self.root/'sync';folder.mkdir()
+        for index in range(self.service.MAX_FOLDER_FILES+1):
+            (folder/f'wokyis-health-{index}.json').write_text(json.dumps(self.sample))
+        with self.assertRaisesRegex(ValueError,'文件过多'):
+            self.service.configure({'path':str(folder)})
+        for file in folder.iterdir():file.unlink()
+        for index in range(5):
+            (folder/f'wokyis-health-{index}.json').write_bytes(b' '*900000)
+        with self.assertRaisesRegex(ValueError,'总大小超过'):
+            self.service.configure({'path':str(folder)})
+        for file in folder.iterdir():file.unlink()
+        row={'kind':'heartRate','value':72,'unit':'bpm','at':'2025-01-01T10:00:00Z'}
+        for index in range(2):
+            (folder/f'wokyis-health-{index}.json').write_text(json.dumps({'schemaVersion':2,'samples':[row]*3000}))
+        with self.assertRaisesRegex(ValueError,'样本过多'):
+            self.service.configure({'path':str(folder)})
 
     def test_oversized_or_non_json_file_cannot_replace_source(self):
         self.service.import_data(self.sample)

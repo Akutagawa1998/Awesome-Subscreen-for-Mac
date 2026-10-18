@@ -163,8 +163,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         if action == "fullscreen" { toggleFullscreen() }
         if action == "health-file" {
             let panel = NSOpenPanel()
-            panel.allowedContentTypes = [.json]; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-            panel.message = "选择由 iPhone 健康快捷指令同步的 JSON 文件"
+            panel.allowedContentTypes = [.json]
+            panel.canChooseFiles = true; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+            panel.message = "选择 Wokyis 健康同步文件夹，或单个 JSON 文件"
+            panel.prompt = "连接"
+            let healthFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/Wokyis")
+            if FileManager.default.fileExists(atPath: healthFolder.path) { panel.directoryURL = healthFolder }
             panel.beginSheetModal(for: window) { response in
                 guard response == .OK, let path = panel.url?.path,
                       let data = try? JSONSerialization.data(withJSONObject: [path]),

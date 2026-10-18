@@ -2,12 +2,16 @@
 from datetime import datetime, timezone
 import json
 import math
+from itertools import islice
 from pathlib import Path
 import time
 
 
 class WellnessService:
     MAX_BYTES = 1_000_000
+    MAX_FOLDER_FILES = 32
+    MAX_FOLDER_BYTES = 4_000_000
+    MAX_FOLDER_SAMPLES = 5000
     # Bounds reject corrupt input, not clinical categories or recommendations.
     FIELDS = {'heartRate':(1,400,'bpm'), 'restingHeartRate':(1,400,'bpm'),
               'hrv':(0,1000,'ms'), 'sleepHours':(0,24,'h')}
@@ -137,28 +141,99 @@ class WellnessService:
 
     def configure(self, value):
         path = Path(str(value.get('path',''))).expanduser()
-        if not path.is_absolute() or path.suffix.lower() != '.json' or not path.is_file():
-            raise ValueError('请选择本机或 iCloud Drive 中的 JSON 文件')
-        self.load_file(path) # Validate before replacing the working source.
+        if not path.is_absolute() or not (path.is_dir() or (path.suffix.lower() == '.json' and path.is_file())):
+            raise ValueError('请选择本机或 iCloud Drive 中的 JSON 文件或健康同步文件夹')
+        self.load_source(path) # Validate before replacing the working source.
         self.storage.update(lambda d:d.update(sourcePath=str(path),snapshot=None))
         return self.read()
+
+    def load_source(self, path):
+        return self.load_folder(path) if path.is_dir() else self.load_file(path)
+
+    @staticmethod
+    def decode_json(raw):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise ValueError('健康文件暂不可读，请等待同步完成') from None
 
     def load_file(self, path):
         with path.open('rb') as f:
             raw = f.read(self.MAX_BYTES+1)
         if len(raw) > self.MAX_BYTES:
             raise ValueError('请使用最近健康样本的 JSON（小于 1 MB）')
-        try:
-            return self.normalize(json.loads(raw))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            raise ValueError('健康文件暂不可读，请等待同步完成') from None
+        return self.normalize(self.decode_json(raw))
+
+    def load_folder(self, path):
+        # Only direct children of the explicitly selected folder are eligible.
+        files = sorted(islice(path.glob('wokyis-health*.json'), self.MAX_FOLDER_FILES+1))
+        if len(files) > self.MAX_FOLDER_FILES:
+            raise ValueError(f'健康同步文件过多，请保留不超过 {self.MAX_FOLDER_FILES} 个最近文件')
+        snapshots, samples, invalid = [], [], 0
+        total_size, total_read = 0, 0
+        for file in files:
+            if file.is_symlink() or not file.is_file():
+                invalid += 1
+                continue
+            try:
+                size = file.stat().st_size
+            except OSError:
+                invalid += 1
+                continue
+            total_size += size
+            if total_size > self.MAX_FOLDER_BYTES:
+                raise ValueError('健康同步文件总大小超过 4 MB，请只保留最近的样本文件')
+            try:
+                with file.open('rb') as f:
+                    raw = f.read(min(self.MAX_BYTES, self.MAX_FOLDER_BYTES-total_read)+1)
+            except OSError:
+                invalid += 1
+                continue
+            total_read += len(raw)
+            if total_read > self.MAX_FOLDER_BYTES:
+                raise ValueError('健康同步文件总大小超过 4 MB，请只保留最近的样本文件')
+            try:
+                if len(raw) > self.MAX_BYTES:
+                    raise ValueError('健康文件超过 1 MB')
+                data = self.decode_json(raw)
+                snapshot = self.normalize(data)
+            except ValueError:
+                invalid += 1
+                continue
+            if data.get('schemaVersion') == 2:
+                samples.extend(data['samples'])
+                if len(samples) > self.MAX_FOLDER_SAMPLES:
+                    raise ValueError('健康同步样本过多，请只保留最近的样本文件')
+            else:
+                snapshots.append(snapshot)
+        # Normalize raw v2 rows together so copied files and overlapping sleep
+        # segments are merged by their actual source and interval, never added.
+        if samples:
+            snapshots.append(self.normalize_samples({'samples':samples}))
+        result = {'source':'Apple Health', 'metrics':{}, 'sources':[], 'warnings':[]}
+        sources = set()
+        for snapshot in snapshots:
+            sources.update(snapshot.get('sources',[]))
+            result['warnings'].extend(snapshot.get('warnings',[]))
+            for key, metric in snapshot['metrics'].items():
+                sources.add(metric['source'])
+                previous = result['metrics'].get(key)
+                if not previous or self.sample_date(metric['at']) > self.sample_date(previous['at']):
+                    result['metrics'][key] = metric
+        if not result['metrics']:
+            raise ValueError('文件夹内没有可用健康数据，请运行 iPhone 快捷指令并等待 wokyis-health 开头的 JSON 文件同步')
+        result['sources'] = sorted(sources)
+        if invalid:
+            result['warnings'].insert(0,f'{invalid} 个健康同步文件暂不可读或没有有效数据，已跳过')
+        return result
 
     def read(self):
         data = self.storage.read()
         result = {'connected':False,'metrics':{},'mode':None,'error':None}
         try:
             if data.get('sourcePath'):
-                result.update(self.load_file(Path(data['sourcePath'])),connected=True,mode='file')
+                path = Path(data['sourcePath'])
+                result.update(self.load_source(path),connected=True,mode='folder' if path.is_dir() else 'file')
             elif data.get('snapshot'):
                 result.update(data['snapshot'],connected=True,mode='import')
         except (ValueError, OSError) as e:
