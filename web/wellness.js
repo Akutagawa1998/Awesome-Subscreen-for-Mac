@@ -41,20 +41,38 @@
       renderTodo();toast(done?'已完成；在「已完成」中可恢复':'已恢复待办');
     });
   });
-  function renderHealth(){
+  function updateHealthAge(){
     const m=health?.metrics||{}, heart=m.heartRate, fresh=heart&&age(heart.at)<5;
-    $('#health-live').textContent=health?.error?'同步中断':heart?(fresh?'最近采样':'等待新采样'):health?.connected?'已连接':'未连接';
+    const text=(selector,value)=>{const node=$(selector);if(node&&node.textContent!==value)node.textContent=value;};
+    text('#health-live',health?.error?'同步中断':heart?(fresh?'最近采样':'等待新采样'):health?.connected?'已连接':'未连接');
     $('#health-live').classList.toggle('fresh',!!fresh&&!health?.error);
+    $('#health-heart-reading')?.classList.toggle('fresh',!!fresh&&!health?.error);
+    let sample=heart?`${ago(heart.at)} · ${health.mode==='import'?'导入快照':heart.source||'Apple Health'}`:'等待 iPhone 同步';
+    if(health?.error)sample+=` · ${health.error}`;
+    if(health?.warnings?.length)sample+=` · ${health.warnings[0]}`;
+    text('#health-sample-time',sample);
+    for(const [key,selector] of [['hrv','#health-hrv-time'],['restingHeartRate','#health-resting-time'],['sleepHours','#health-sleep-time']]){
+      const metric=m[key];text(selector,metric?`${ago(metric.at)} · ${metric.source||'Apple Health'}`:'暂无数据');
+    }
+  }
+  function renderHealth(){
+    const m=health?.metrics||{}, heart=m.heartRate;
     const number=(metric,digits=0)=>metric?Number(metric.value).toFixed(digits):'—';
-    $('#health-content').innerHTML=`<div class="heart-reading ${fresh?'fresh':''}"><div><span class="metric-caption">心率</span><div class="heart-number">${number(heart)}<small>bpm</small></div></div><span class="heart-glyph" aria-hidden="true">♡</span></div>
-      <div class="sample-time">${heart?`${ago(heart.at)} · ${health.mode==='import'?'导入快照':esc(heart.source||'Apple Health')}`:'等待 iPhone 同步'}${health?.error?` · ${esc(health.error)}`:''}${health?.warnings?.length?` · ${esc(health.warnings[0])}`:''}</div>
-      <div class="recovery-heading">恢复参考</div><div class="recovery-grid"><div><span>HRV</span><strong>${number(m.hrv)}<small>ms</small></strong><em>${m.hrv?ago(m.hrv.at)+' · '+esc(m.hrv.source||'Apple Health'):'暂无数据'}</em></div><div><span>静息心率</span><strong>${number(m.restingHeartRate)}<small>bpm</small></strong><em>${m.restingHeartRate?ago(m.restingHeartRate.at)+' · '+esc(m.restingHeartRate.source||'Apple Health'):'暂无数据'}</em></div><div><span>最近睡眠</span><strong>${number(m.sleepHours,1)}<small>h</small></strong><em>${m.sleepHours?ago(m.sleepHours.at)+' · '+esc(m.sleepHours.source||'Apple Health'):'暂无数据'}</em></div></div>`;
+    $('#health-content').innerHTML=`<div class="heart-reading" id="health-heart-reading"><div><span class="metric-caption">心率</span><div class="heart-number">${number(heart)}<small>bpm</small></div></div><span class="heart-glyph" aria-hidden="true">♡</span></div>
+      <div class="sample-time" id="health-sample-time"></div>
+      <div class="recovery-heading">恢复参考</div><div class="recovery-grid"><div><span>HRV</span><strong>${number(m.hrv)}<small>ms</small></strong><em id="health-hrv-time"></em></div><div><span>静息心率</span><strong>${number(m.restingHeartRate)}<small>bpm</small></strong><em id="health-resting-time"></em></div><div><span>最近睡眠</span><strong>${number(m.sleepHours,1)}<small>h</small></strong><em id="health-sleep-time"></em></div></div>`;
+    updateHealthAge();
   }
   async function loadHealth(){
     if(healthBusy)return;healthBusy=true;
-    try{health=await api('/api/wellness');lastHealth=Date.now();}
-    catch{health={connected:false,metrics:{},error:'本机服务未连接'};}
-    finally{healthBusy=false;renderHealth();}
+    const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),8000);
+    try{
+      const next=await api('/api/wellness',undefined,{signal:controller.signal});
+      if(next.error)throw Error(next.error);
+      health=next;
+    }
+    catch(error){health={...(health||{connected:false,metrics:{}}),error:controller.signal.aborted?'健康同步读取超时，稍后重试':error.message||'本机服务未连接'};}
+    finally{clearTimeout(timeout);healthBusy=false;lastHealth=Date.now();renderHealth();}
   }
   function tickReminders(){
     for(const key of ['stand','water']){
@@ -90,8 +108,8 @@
   document.addEventListener('click',e=>{if(e.target.closest('[data-wellness-settings]'))openSettings();});
   $('#refresh-todo').addEventListener('click',()=>loadTodo(true));
   $('#wellness-dialog').addEventListener('close',()=>{if(visible){loadTodo();loadHealth();}});
-  window.addEventListener('focus',()=>{if(visible){loadTodo();loadHealth();}});
-  window.wellnessUI={pageChanged(on){visible=on;if(on){loadTodo();loadHealth();}}};
-  setInterval(()=>{tickReminders();if(visible){if(Date.now()-lastTodo>60000)loadTodo();if(Date.now()-lastHealth>10000)loadHealth();}},1000);
+  window.addEventListener('focus',()=>{if(visible){updateHealthAge();loadTodo();loadHealth();}});
+  window.wellnessUI={pageChanged(on){visible=on;if(on){updateHealthAge();loadTodo();loadHealth();}}};
+  setInterval(()=>{tickReminders();if(visible){updateHealthAge();if(Date.now()-lastTodo>60000)loadTodo();if(Date.now()-lastHealth>10000)loadHealth();}},1000);
   renderHealth();tickReminders();if(visible){loadTodo();loadHealth();}
 })();

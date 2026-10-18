@@ -15,10 +15,12 @@ let calendarData = {events:[],calendars:[],errors:[]}, googleConfig = null, cale
 let claudeLoadedAt = 0, claudeBusy = false, calendarFetchedAt = 0;
 let toastTimer;
 
-async function api(path, body) {
-  const response = await fetch(path, body === undefined ? {cache:'no-store'} : {
+async function api(path, body, options = {}) {
+  const request = body === undefined ? {cache:'no-store'} : {
     method:'POST', headers:{'Content-Type':'application/json','X-Wokyis':'1'}, body:JSON.stringify(body)
-  });
+  };
+  if (options.signal) request.signal = options.signal;
+  const response = await fetch(path, request);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || '暂时无法连接');
   return data;
