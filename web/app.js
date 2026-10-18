@@ -5,6 +5,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const compact = n => n == null ? '—' : new Intl.NumberFormat('en-US', {notation:'compact', maximumFractionDigits:1}).format(n);
 const fmtNumber = n => new Intl.NumberFormat('en-US').format(n || 0);
 const ny = 'America/New_York';
+const calendarZone = 'Asia/Shanghai';
 const {timeParts,dayKey,eventOnDay,uniqueEvents}=window.timeHelpers;
 const PAGE = {calendar:2,todo:3,codex:4,claude:5,terminal:6};
 const pageCount = $$('.page').length;
@@ -115,17 +116,22 @@ function updateClocks(){renderClock('ny',ny);renderClock('sh','Asia/Shanghai');}
 updateClocks();setInterval(updateClocks,250);
 
 const todayKey=()=>dayKey(new Date());
-let chosenDate=todayKey(), monthDate=new Date(chosenDate+'T12:00:00Z');
+const calendarTodayKey=()=>dayKey(new Date(),calendarZone);
+let chosenDate=calendarTodayKey(), monthDate=new Date(chosenDate+'T12:00:00Z');
 function renderCalendar() {
   const year=monthDate.getUTCFullYear(), month=monthDate.getUTCMonth();
+  const today=calendarTodayKey();
   $('#month-title').textContent=`${year}年 ${month+1}月`;
   const first=new Date(Date.UTC(year,month,1)), gridStart=new Date(+first-first.getUTCDay()*86400000);
   $('#month-grid').innerHTML=Array.from({length:42},(_,i)=>{
-    const date=new Date(+gridStart+i*86400000), key=date.toISOString().slice(0,10), has=calendarData.events.some(e=>eventOnDay(e,key));
-    return `<button class="day ${date.getUTCMonth()!==month?'outside':''} ${key===todayKey()?'today':''} ${key===chosenDate?'chosen':''}" data-day="${key}" aria-label="${key}${has?' 有日程':''}" ${key===chosenDate?'aria-pressed="true"':''}>${date.getUTCDate()}${has?'<span class="event-dot"></span>':''}</button>`;
+    const date=new Date(+gridStart+i*86400000), key=date.toISOString().slice(0,10), has=calendarData.events.some(e=>eventOnDay(e,key,calendarZone));
+    return `<button class="day ${date.getUTCMonth()!==month?'outside':''} ${key===today?'today':''} ${key===chosenDate?'chosen':''}" data-day="${key}" aria-label="${key}${has?' 有日程':''}" ${key===chosenDate?'aria-pressed="true"':''}>${date.getUTCDate()}${has?'<span class="event-dot"></span>':''}</button>`;
   }).join('');
   $('#agenda-day').textContent=new Intl.DateTimeFormat('zh-CN',{timeZone:'UTC',month:'long',day:'numeric',weekday:'short'}).format(new Date(chosenDate+'T12:00:00Z'));
-  const events=uniqueEvents(calendarData.events.filter(e=>eventOnDay(e,chosenDate))).sort((a,b)=>(a.start.date||a.start.dateTime).localeCompare(b.start.date||b.start.dateTime));
+  const events=uniqueEvents(calendarData.events.filter(e=>eventOnDay(e,chosenDate,calendarZone))).sort((a,b)=>{
+    if(Boolean(a.start.date)!==Boolean(b.start.date))return a.start.date?-1:1;
+    return a.start.date?a.start.date.localeCompare(b.start.date):Date.parse(a.start.dateTime)-Date.parse(b.start.dateTime);
+  });
   const hasAccounts=googleConfig?.accounts?.length;
   const problems=calendarData.errors.length?`<div class="notice warn">${esc(calendarData.errors[0].message)}${calendarData.errors.length>1?`（${calendarData.errors.length} 个同步问题）`:''}</div>`:'';
   if(!hasAccounts){
@@ -135,8 +141,8 @@ function renderCalendar() {
     $('#agenda-list').innerHTML=problems+events.map(e=>{
       let timing='全天';
       if(e.start.dateTime){
-        const f=new Intl.DateTimeFormat('zh-CN',{timeZone:ny,hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
-        timing=`${dayKey(new Date(e.start.dateTime))<chosenDate?'前一天':f.format(new Date(e.start.dateTime))} — ${dayKey(new Date(e.end.dateTime))>chosenDate?'次日 ':''}${f.format(new Date(e.end.dateTime))}`;
+        const f=new Intl.DateTimeFormat('zh-CN',{timeZone:calendarZone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+        timing=`${dayKey(new Date(e.start.dateTime),calendarZone)<chosenDate?'前一天':f.format(new Date(e.start.dateTime))} — ${dayKey(new Date(e.end.dateTime),calendarZone)>chosenDate?'次日 ':''}${f.format(new Date(e.end.dateTime))}`;
       }
       return `<article class="event" style="border-color:${esc(e.color)}"><div class="event-time" style="color:${esc(e.color)}">${esc(timing)}</div><h3>${esc(e.title)}</h3>${e.location?`<p class="event-location">${esc(e.location)}</p>`:''}<div class="event-account">${esc(e.account)}</div></article>`;
     }).join('');
@@ -160,7 +166,7 @@ async function loadCalendar(force=false) {
 $('#month-grid').addEventListener('click',e=>{const b=e.target.closest('[data-day]');if(b){chosenDate=b.dataset.day;renderCalendar();}});
 function moveMonth(delta){if(calendarBusy)return;monthDate=new Date(Date.UTC(monthDate.getUTCFullYear(),monthDate.getUTCMonth()+delta,1,12));chosenDate=monthDate.toISOString().slice(0,10);loadCalendar();}
 $('#month-prev').addEventListener('click',()=>moveMonth(-1));$('#month-next').addEventListener('click',()=>moveMonth(1));
-$('#month-today').addEventListener('click',()=>{if(calendarBusy)return;chosenDate=todayKey();monthDate=new Date(chosenDate+'T12:00:00Z');loadCalendar();});
+$('#month-today').addEventListener('click',()=>{if(calendarBusy)return;chosenDate=calendarTodayKey();monthDate=new Date(chosenDate+'T12:00:00Z');loadCalendar();});
 $('#refresh-calendar').addEventListener('click',()=>loadCalendar(true));
 $('#calendar-settings').addEventListener('click',openSettings);
 document.addEventListener('click',e=>{if(e.target.closest('[data-settings]'))openSettings();if(e.target.closest('[data-close]'))e.target.closest('dialog').close();});
