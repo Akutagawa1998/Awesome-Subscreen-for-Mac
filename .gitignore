@@ -1,0 +1,12 @@
+.local/
+__pycache__/
+*.pyc
+build/
+.DS_Store
+
+# Personal skills and account-specific exports are never published with the app.
+design-skills/
+ui-ux-design-toolkit.zip
+*.log
+.env
+.env.*

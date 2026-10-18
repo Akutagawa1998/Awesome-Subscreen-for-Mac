@@ -1,0 +1,34 @@
+{
+  "xterm": {
+    "url": "https://registry.npmjs.org/@xterm/xterm/-/xterm-5.5.0.tgz",
+    "sha256": "bd954fa721872170188cc5d7e83e88db3c83c9a18a4e8d24c2783d26491f59d2"
+  },
+  "fit": {
+    "url": "https://registry.npmjs.org/@xterm/addon-fit/-/addon-fit-0.10.0.tgz",
+    "sha256": "917ac44972453d5eed52edc1e50260c76398ce48cf2290c2e60671102bba0b33"
+  },
+  "hack-regular.woff2": {
+    "url": "https://raw.githubusercontent.com/source-foundry/Hack/v3.003/build/web/fonts/hack-regular.woff2",
+    "sha256": "0b0ef254dfc7afc172528e3166eace813989e1cf77f576ddae5f5e8fb2897c06"
+  },
+  "hack-bold.woff2": {
+    "url": "https://raw.githubusercontent.com/source-foundry/Hack/v3.003/build/web/fonts/hack-bold.woff2",
+    "sha256": "d5a65190e12d1d7a4e804085dc3cc2bc8264ba0f63351bb8c8905c501fa69aa3"
+  },
+  "Hack-LICENSE.md": {
+    "url": "https://raw.githubusercontent.com/source-foundry/Hack/v3.003/LICENSE.md",
+    "sha256": "1f61bb7c790c59b4b0ecdf304628b94e42ae4c8020094a8c3da73381ab212623"
+  },
+  "sarasa-mono-sc-regular.woff2": {
+    "url": "https://github.com/be5invis/Sarasa-Gothic/releases/download/v1.0.42/SarasaMonoSC-TTF-1.0.42.7z",
+    "sourceFile": "SarasaMonoSC-Regular.ttf",
+    "conversion": "Lossless WOFF2 packaging; all original glyphs retained",
+    "sha256": "57b501a5722f3d998b8aaf56b16dd90c6cad9bd462319c067881f2f8ddf71188"
+  },
+  "sarasa-mono-sc-bold.woff2": {
+    "url": "https://github.com/be5invis/Sarasa-Gothic/releases/download/v1.0.42/SarasaMonoSC-TTF-1.0.42.7z",
+    "sourceFile": "SarasaMonoSC-Bold.ttf",
+    "conversion": "Lossless WOFF2 packaging; all original glyphs retained",
+    "sha256": "4c35f1411131b85836ad72c6bb1a60055e0ae55715c9c863a58d55c1840e16f5"
+  }
+}

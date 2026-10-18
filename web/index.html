@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#080808">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/retro.css">
+  <link rel="stylesheet" href="/wellness.css">
+  <link rel="preload" href="/vendor/hack-regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/vendor/sarasa-mono-sc-regular.woff2" as="font" type="font/woff2" crossorigin>
+  <title>Wokyis · 小小操作台</title>
+</head>
+<body>
+  <main id="deck" aria-label="Wokyis 操作台">
+    <section class="page clock-page active" data-page="0" aria-label="纽约时钟">
+      <header class="clock-heading"><div><span class="eyebrow">01 / WORLD CLOCK</span><h1>New York <span>纽约</span></h1></div><span class="zone-label" id="ny-zone">AMERICA / NEW YORK</span></header>
+      <div class="clock-display" id="ny-clock" aria-label="纽约时间"></div>
+      <footer class="clock-footer"><div id="ny-date"></div><div class="seconds"><span class="pulse"></span><span id="ny-seconds"></span></div></footer>
+    </section>
+    <section class="page clock-page shanghai" data-page="1" aria-label="上海时钟" inert>
+      <header class="clock-heading"><div><span class="eyebrow">02 / WORLD CLOCK</span><h1>Shanghai <span>上海</span></h1></div><span class="zone-label" id="sh-zone">ASIA / SHANGHAI</span></header>
+      <div class="clock-display" id="sh-clock" aria-label="上海时间"></div>
+      <footer class="clock-footer"><div id="sh-date"></div><div class="seconds"><span class="pulse"></span><span id="sh-seconds"></span></div></footer>
+    </section>
+    <section class="page" data-page="2" aria-label="日历" inert>
+      <header class="page-heading"><div><span class="eyebrow">03 / YOUR DAYS</span><h1>日历 <span class="subtitle">所有账号，一起看</span></h1></div><button class="soft" id="calendar-settings">账号管理 <span>＋</span></button></header>
+      <div class="calendar-layout">
+        <div class="month-panel panel"><div class="month-toolbar"><h2 id="month-title"></h2><div class="button-group"><button class="icon-btn" id="month-prev" aria-label="上个月">‹</button><button class="small" id="month-today">今天</button><button class="icon-btn" id="month-next" aria-label="下个月">›</button></div></div><div class="weekday"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div id="month-grid"></div><div class="calendar-zone">日程时区 · 纽约 <span id="calendar-sync"></span></div></div>
+        <aside class="agenda panel"><div class="agenda-top"><h2 id="agenda-day"></h2><button id="refresh-calendar" class="icon-btn" aria-label="同步日历">↻</button></div><div id="agenda-list" class="scroll"></div></aside>
+      </div>
+    </section>
+    <section class="page wellness-page" data-page="3" aria-label="待办与健康" inert>
+      <header class="page-heading"><div><span class="eyebrow">04 / DAILY CHECK-IN</span><h1>待办 <span class="subtitle">专注，也照顾自己</span></h1></div><button class="soft" id="wellness-settings">连接与提醒</button></header>
+      <div class="wellness-layout">
+        <section class="panel todo-panel" aria-label="Microsoft To Do"><header class="panel-heading"><h2>Microsoft To Do</h2><button class="icon-btn" id="refresh-todo" aria-label="同步待办">↻</button></header><div id="todo-content" class="scroll"></div></section>
+        <section class="panel health-panel" aria-label="健康与提醒"><header class="panel-heading"><h2>身体状态</h2><span class="health-live" id="health-live">未连接</span></header>
+          <div id="health-content"></div>
+          <div class="reminder-grid"><button id="stand-done" class="reminder"><span class="reminder-label">站立一下</span><strong id="stand-timer">60:00</strong><span class="reminder-action">已站立 · 重置</span></button><button id="water-done" class="reminder"><span class="reminder-label">喝口水</span><strong id="water-timer">45:00</strong><span class="reminder-action">已喝水 · 重置</span></button></div>
+        </section>
+      </div>
+    </section>
+    <section class="page" data-page="4" aria-label="Codex 控制台" inert>
+      <header class="page-heading"><div><span class="eyebrow">05 / AGENT DESK</span><h1>Codex <span id="codex-connection" class="connection">连接中</span></h1></div><div class="button-group"><button class="soft" id="restore-sessions">已隐藏 <span id="hidden-count">0</span></button><button class="icon-btn" id="refresh-codex" aria-label="刷新 Codex">↻</button></div></header>
+      <div class="agent-layout">
+        <aside class="agent-sidebar"><div class="usage-panel panel"><div class="usage-top"><span>账户用量</span><span id="plan-name" class="tag">CODEX</span></div><div id="codex-usage"><div class="muted">正在读取真实用量…</div></div><div class="session-counts" id="session-counts"></div></div><div class="session-toolbar"><h2>会话</h2><span id="session-coverage" class="muted"></span></div><div id="session-list" class="session-list scroll"></div></aside>
+        <article id="agent-detail" class="agent-detail panel"><div class="empty"><span class="empty-symbol">⌘</span><h2>选择一个会话</h2><p>查看摘要，处理待办。</p></div></article>
+      </div>
+    </section>
+    <section class="page" data-page="5" aria-label="Claude 用量" inert>
+      <header class="page-heading"><div><span class="eyebrow">06 / CLAUDE</span><h1>Claude <span class="subtitle">本机 Code 使用情况</span></h1></div><a class="button soft external" href="https://claude.ai/settings/usage" target="_blank" rel="noreferrer">订阅额度 ↗</a></header>
+      <div id="claude-content" class="claude-layout"><div class="panel empty"><p>正在读取本机记录…</p></div></div>
+    </section>
+    <section class="page terminal-page" data-page="6" aria-label="常驻终端" inert>
+      <header class="page-heading"><div><span class="eyebrow">07 / PERSISTENT SHELL</span><h1>Terminal <span id="terminal-status" class="connection">待连接</span></h1></div><button class="primary" id="new-terminal">＋ 新终端</button></header>
+      <div class="terminal-frame panel">
+        <div class="terminal-toolbar"><div id="terminal-tabs" role="tablist" aria-label="终端会话"></div><button class="soft" id="reconnect-terminal" aria-label="重新连接终端">↻</button></div>
+        <div id="terminal-screen"><div id="terminal-empty" class="empty"><span class="empty-symbol" aria-hidden="true">&gt;_</span><h2>你的常驻终端</h2><p>点击「新终端」开始。<br>切页和退出操作台后，任务继续运行。</p></div></div>
+        <footer class="terminal-footer"><button class="soft" id="terminal-prev">⌘F7 <span>上一个</span></button><button class="soft" id="terminal-close">⌘F8 <span>关闭当前</span></button><button class="soft" id="terminal-next">⌘F9 <span>下一个</span></button></footer>
+      </div>
+    </section>
+  </main>
+  <nav id="navigation" aria-label="切换页面"><div class="nav-pages"><button data-nav="0" class="selected" aria-label="纽约时钟">纽约<span class="nav-dot"></span></button><button data-nav="1" aria-label="上海时钟">上海<span class="nav-dot"></span></button><button data-nav="2" aria-label="日历">日历<span class="nav-dot"></span></button><button data-nav="3" aria-label="待办与健康">待办<span class="nav-dot"></span></button><button data-nav="4" aria-label="Codex">Codex<span class="nav-dot"></span></button><button data-nav="5" aria-label="Claude">Claude<span class="nav-dot"></span></button><button data-nav="6" aria-label="终端">终端<span class="nav-dot"></span></button></div><button id="fullscreen" class="icon-btn" aria-label="切换全屏" title="全屏 · F">⛶</button></nav>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="settings-dialog"><header><div><span class="eyebrow">GOOGLE CALENDAR</span><h2>连接你的日历</h2></div><button class="icon-btn" data-close aria-label="关闭">×</button></header><div class="dialog-content scroll" id="settings-content"></div></dialog>
+  <dialog id="approval-dialog"><header><h2>确认这次请求</h2><button class="icon-btn" data-close aria-label="关闭">×</button></header><div class="dialog-content scroll" id="approval-content"></div></dialog>
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <dialog id="wellness-dialog"><header><h2>连接与提醒</h2><button class="icon-btn" data-close aria-label="关闭">×</button></header><div class="dialog-content scroll" id="wellness-settings-content"></div></dialog>
+  <script src="/time-utils.js"></script>
+  <script src="/gestures.js"></script>
+  <script src="/app.js"></script>
+  <script src="/terminal.js"></script>
+  <script src="/wellness.js"></script>
+</body>
+</html>
