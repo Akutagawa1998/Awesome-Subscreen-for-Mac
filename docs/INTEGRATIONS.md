@@ -5,9 +5,9 @@
 
 ## Microsoft To Do
 
-1. 在 [Microsoft Entra 应用注册](https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) 新建你自己的应用，支持「任何组织目录和个人 Microsoft 账号」。
+1. 在 [Microsoft Entra 应用注册](https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) 新建你自己的应用。私人 To Do 可选「仅个人 Microsoft 账号」；也支持「任何组织目录和个人 Microsoft 账号」。
 2. 在 Authentication 添加 **Mobile and desktop applications** 平台，把 `http://127.0.0.1:8765/oauth/microsoft/callback` 设为回调地址。如果控制台不接受 HTTP IP 地址，用应用清单配置这个 loopback URI，参见 [重定向 URI 限制](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url)。使用公开客户端，不创建 client secret。
-3. 复制 Application (client) ID，在操作台「待办 → 连接与提醒」粘贴。也可用环境变量 `WOKYIS_MICROSOFT_CLIENT_ID` 配置。
+3. 复制 Application (client) ID，在操作台「待办 → 连接与提醒」选择对应账号类型并粘贴。个人账号使用 `consumers` 登录入口，组织和个人账号使用 `common`。也可用环境变量 `WOKYIS_MICROSOFT_CLIENT_ID` 配置默认的 common 应用。
 4. 点击「登录 Microsoft」，在系统浏览器里完成登录和授权：`Tasks.ReadWrite`（读取和完成/恢复你的任务）、`User.Read`（显示账号名称）、`offline_access`（保持登录）。
 5. 返回操作台，点击同步。可选择清单；勾选任务后写回 Microsoft；在「已完成」里可恢复。不会自动创建、删除或完成任何任务。
 
@@ -39,6 +39,30 @@
 }
 ```
 
-每个字段可省略，缺失即显示“暂无数据”。文件小于 100 KB。错误/未完成同步不会被当成零值。心率超过 5 分钟会标为「等待新采样」；导入文件标为「导入快照」。恢复区域展示三个原始指标，不推断诊断或虚构恢复评分。
+每个字段可省略，缺失即显示“暂无数据”。文件小于 1 MB。错误/未完成同步不会被当成零值。心率超过 5 分钟会标为「等待新采样」；导入文件标为「导入快照」。恢复区域展示三个原始指标，不推断诊断或虚构恢复评分。
+
+### Google Health / Fitbit → Apple Health
+
+在 iPhone 的 Google Health 中进入连接 → 合作伙伴 App → Apple Health，允许所需的**写入**类别。当前这套接入使用心率、静息心率、睡眠；不需要为此扩大 Google Health 对 Apple Health 的读取权限。Apple Watch 的数据直接进入 Apple Health，然后由同一个个人快捷指令导出。
+
+[Google 官方支持表](https://support.google.com/googlehealth/answer/17037331)列出了上述写入能力；HRV 目前仅列为从 Apple Health 读取，不能据此声称 Fitbit 的 HRV 已写回 Apple Health。操作台可显示 Apple Watch 写入的 HRV。
+
+### 快捷指令原始样本格式（v2）
+
+可从每个健康样本提取类型、数值、单位、开始/结束日期和来源，导出如下结构。所有日期使用带时区的 ISO 8601；下面仅为格式示例。
+
+```json
+{
+  "schemaVersion": 2,
+  "samples": [
+    {"kind":"heartRate","value":"72","unit":"count/min","at":"2026-01-01T09:30:00-05:00","end":"2026-01-01T09:30:00-05:00","source":"Apple Watch"},
+    {"kind":"sleep","value":"Asleep","unit":"","at":"2026-01-01T00:00:00-05:00","end":"2026-01-01T07:30:00-05:00","source":"Apple Watch"}
+  ]
+}
+```
+
+`kind` 支持 `heartRate`、`restingHeartRate`、`hrv`、`sleep`。每个数值指标选取时间最新的有效样本，保留其来源。睡眠按来源分别合并重叠的已入睡/核心/深度/REM 区间，忽略卧床和清醒；间隔超过 90 分钟划为另一段，展示结束时间最新的一段，标为「最近睡眠」。不同设备的睡眠不相加。无法识别的单位、阶段或日期会显示跳过提示，不会猜测数值。
+
+手机导出的 `wokyis-health.json` 可保存在个人 iCloud Drive / Shortcuts 下。快捷指令首次运行、健康读取授权及个人自动化需要在 iPhone 完成；先验证实际文件再连接小屏。快捷指令定义和个人数据不放进公开仓库。工作流或 iCloud 文件同步成功并不等于设备连续测量，界面以实际采样时间为准。
 
 需要秒级连续心率时，须另做 Apple Watch/iPhone 原生配套应用并获得健康授权；本版没有宣称文件桥接是秒级实时监测。无需为了同步而启动虚假的运动记录。

@@ -293,7 +293,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if size < 0 or size > 100000:
+            limit = WellnessService.MAX_BYTES if self.path == '/api/wellness/import' else 100000
+            if size < 0 or size > limit:
                 return self.reply(413, {'error': '请求过大'})
             data = json.loads(self.rfile.read(size))
             if not isinstance(data, dict):

@@ -39,6 +39,20 @@ class ToDoTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.service.callback(q['state'][0],'code')
         self.assertFalse(self.service.public_config()['connected'])
 
+    def test_personal_authority_used_for_authorization_token_and_refresh(self):
+        self.service.configure({'clientId':self.service.client_id(),'authority':'consumers'})
+        url=self.service.begin();q=parse_qs(urlparse(url).query)
+        self.assertIn('/consumers/',url)
+        self.service.fetch.side_effect=[{'scope':'Tasks.ReadWrite','access_token':'test','refresh_token':'refresh','expires_in':0}, {'displayName':'Example'}, {'access_token':'refreshed'}]
+        self.service.callback(q['state'][0],'code')
+        self.assertIn('/consumers/',self.service.fetch.call_args_list[0].args[0])
+        self.assertEqual(self.service.token(),'refreshed')
+        self.assertIn('/consumers/',self.service.fetch.call_args.args[0])
+        q=parse_qs(urlparse(self.service.begin()).query)
+        self.service.configure({'clientId':self.service.client_id(),'authority':'common'})
+        with self.assertRaises(ValueError):self.service.callback(q['state'][0],'code')
+        with self.assertRaises(ValueError):self.service.configure({'clientId':self.service.client_id(),'authority':'example.org'})
+
     def test_pagination_rejects_external_host_before_sending_token(self):
         self.service.fetch.return_value={'value':[], '@odata.nextLink':'https://example.org/collect'}
         with self.assertRaises(ValueError):self.service.paged(self.service.GRAPH+'/me/todo/lists','test')
@@ -94,6 +108,40 @@ class HealthTests(unittest.TestCase):
 
     def test_oversized_or_non_json_file_cannot_replace_source(self):
         self.service.import_data(self.sample)
-        f=self.root/'large.json';f.write_text(' '*100001)
+        f=self.root/'large.json';f.write_text(' '*(self.service.MAX_BYTES+1))
         with self.assertRaises(ValueError):self.service.configure({'path':str(f)})
         self.assertEqual(self.service.read()['metrics']['heartRate']['value'],72)
+
+    def test_shortcut_samples_keep_source_time_and_convert_known_units(self):
+        rows=[{'kind':'heartRate','value':'72','unit':'次/分','at':'2025-01-01T10:00:00Z','source':'Apple Watch'},
+              {'kind':'heartRate','value':'75','unit':'bpm','at':'2025-01-01T11:00:00Z','source':'Google Health'},
+              {'kind':'hrv','value':'0.045','unit':'s','at':'2025-01-01T10:00:00Z','source':'Apple Watch'}]
+        r=self.service.import_data({'schemaVersion':2,'samples':rows})
+        self.assertEqual(r['metrics']['heartRate']['value'],75)
+        self.assertEqual(r['metrics']['heartRate']['source'],'Google Health')
+        self.assertEqual(r['metrics']['hrv']['value'],45)
+        self.assertEqual(r['sources'],['Apple Watch','Google Health'])
+        self.assertEqual(r['warnings'],[])
+
+    def test_sleep_overlap_and_duplicate_device_records_are_not_added(self):
+        def sleep(value,start,end,source='Apple Watch'):
+            return {'kind':'sleep','value':value,'at':f'2025-01-01T{start}:00:00Z','end':f'2025-01-01T{end}:00:00Z','source':source}
+        rows=[sleep('Asleep','00','08'),sleep('Core','00','04'),sleep('Deep','03','05'),
+              sleep('In Bed','00','09'),sleep('Awake','08','09'),sleep('Asleep','00','08','Google Health')]
+        r=self.service.import_data({'schemaVersion':2,'samples':rows})
+        self.assertEqual(r['metrics']['sleepHours']['value'],8)
+        self.assertIn(r['metrics']['sleepHours']['source'],['Apple Watch','Google Health'])
+        rows.append(sleep('Core','16','17'))
+        r=self.service.import_data({'schemaVersion':2,'samples':rows})
+        self.assertEqual(r['metrics']['sleepHours']['value'],1) # latest bout, not all-day sum
+
+    def test_unknown_units_or_categories_do_not_become_valid_metrics(self):
+        rows=[{'kind':'heartRate','value':'72','unit':'mystery','at':'2025-01-01T10:00:00Z'},
+              {'kind':'sleep','value':'unknown','at':'2025-01-01T00:00:00Z','end':'2025-01-01T08:00:00Z','source':'Watch'}]
+        with self.assertRaises(ValueError):self.service.import_data({'schemaVersion':2,'samples':rows})
+        rows.append({'kind':'heartRate','value':'76','unit':'count/min','at':'2025-01-01T10:00:00Z'})
+        r=self.service.import_data({'schemaVersion':2,'samples':rows})
+        self.assertEqual(r['metrics']['heartRate']['value'],76)
+        self.assertNotIn('sleepHours',r['metrics'])
+        self.assertTrue(r['warnings'])
+        with self.assertRaises(ValueError):self.service.import_data({'schemaVersion':2,'samples':[]})

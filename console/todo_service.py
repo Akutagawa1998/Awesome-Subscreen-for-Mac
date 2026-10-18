@@ -14,7 +14,6 @@ from urllib.request import Request, urlopen
 
 class TodoService:
     GRAPH = 'https://graph.microsoft.com/v1.0'
-    AUTH = 'https://login.microsoftonline.com/common/oauth2/v2.0'
     SCOPES = 'offline_access https://graph.microsoft.com/Tasks.ReadWrite https://graph.microsoft.com/User.Read'
 
     def __init__(self, storage, origin):
@@ -48,20 +47,33 @@ class TodoService:
     def client_id(self):
         return self.storage.read().get('clientId') or os.environ.get('WOKYIS_MICROSOFT_CLIENT_ID', '')
 
+    def authority(self):
+        # Personal-only registrations must use the consumers sign-in endpoint.
+        return self.storage.read().get('authority', 'common')
+
+    def auth_url(self, authority=None):
+        return 'https://login.microsoftonline.com/' + (authority or self.authority()) + '/oauth2/v2.0'
+
     def public_config(self):
         account = self.storage.read().get('account')
         return {'configured': bool(self.client_id()), 'connected': bool(account),
                 'account': account.get('name', 'Microsoft') if account else None,
-                'redirectUri': self.origin + '/oauth/microsoft/callback'}
+                'redirectUri': self.origin + '/oauth/microsoft/callback', 'authority': self.authority()}
 
     def configure(self, value):
         ident = str(value.get('clientId', '')).strip()
         if not re.fullmatch(r'[a-fA-F0-9]{8}-(?:[a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12}', ident):
             raise ValueError('请输入 Microsoft 应用的 Application (client) ID')
+        authority = value.get('authority', self.authority())
+        if authority not in ('common', 'consumers'):
+            raise ValueError('无效的 Microsoft 账号类型')
         with self.lock:
             if ident != self.client_id():
-                self.storage.update(lambda d: (d.clear(), d.update(clientId=ident)))
+                self.storage.update(lambda d: (d.clear(), d.update(clientId=ident, authority=authority)))
                 self.pending.clear(); self.cache = None
+            elif authority != self.authority():
+                self.storage.update(lambda d: d.update(authority=authority))
+                self.pending.clear()
 
     def begin(self):
         if not self.client_id():
@@ -69,9 +81,9 @@ class TodoService:
         state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
         with self.lock:
             self.pending = {s:p for s,p in self.pending.items() if time.time()-p['created'] < 600}
-            self.pending[state] = {'verifier': verifier, 'created': time.time(), 'clientId': self.client_id()}
+            self.pending[state] = {'verifier': verifier, 'created': time.time(), 'clientId': self.client_id(), 'authority': self.authority()}
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
-        return self.AUTH + '/authorize?' + urlencode({
+        return self.auth_url() + '/authorize?' + urlencode({
             'client_id': self.client_id(), 'redirect_uri': self.origin+'/oauth/microsoft/callback',
             'response_type': 'code', 'response_mode': 'query', 'scope': self.SCOPES,
             'state': state, 'code_challenge': challenge, 'code_challenge_method': 'S256', 'prompt': 'select_account'})
@@ -83,7 +95,7 @@ class TodoService:
                 raise ValueError('授权请求已过期，请从操作台重新连接')
             if not code:
                 raise ValueError('Microsoft 授权未完成')
-            tokens = self.fetch(self.AUTH+'/token', form={
+            tokens = self.fetch(self.auth_url(pending['authority'])+'/token', form={
                 'client_id': self.client_id(), 'grant_type': 'authorization_code', 'code': code,
                 'redirect_uri': self.origin+'/oauth/microsoft/callback', 'code_verifier': pending['verifier']})
             granted = {s.rsplit('/', 1)[-1].lower() for s in tokens.get('scope', '').split()}
@@ -91,7 +103,8 @@ class TodoService:
                 raise ValueError('未授予 To Do 任务权限，请重新连接')
             profile = self.fetch(self.GRAPH+'/me?$select=displayName', token=tokens['access_token'])
             account = {'name': profile.get('displayName', 'Microsoft'), 'accessToken': tokens['access_token'],
-                       'refreshToken': tokens.get('refresh_token'), 'expiresAt': time.time()+tokens.get('expires_in', 3600)}
+                       'refreshToken': tokens.get('refresh_token'), 'expiresAt': time.time()+tokens.get('expires_in', 3600),
+                       'authority': pending['authority']}
             self.storage.update(lambda d: d.update(account=account)); self.cache = None
 
     def token(self):
@@ -103,7 +116,7 @@ class TodoService:
                 return account['accessToken']
             if not account.get('refreshToken'):
                 raise ValueError('Microsoft 账号需要重新授权')
-            tokens = self.fetch(self.AUTH+'/token', form={'client_id': self.client_id(),
+            tokens = self.fetch(self.auth_url(account.get('authority', self.authority()))+'/token', form={'client_id': self.client_id(),
                 'grant_type':'refresh_token','refresh_token':account['refreshToken'],'scope':self.SCOPES})
             account.update(accessToken=tokens['access_token'], refreshToken=tokens.get('refresh_token', account['refreshToken']),
                            expiresAt=time.time()+tokens.get('expires_in', 3600))
