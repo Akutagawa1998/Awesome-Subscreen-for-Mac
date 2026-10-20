@@ -55,7 +55,11 @@ Codex 的“0 运行”仅是连接到的本地服务已确认的数量。旁边
 5. 点击“添加 Google 账号”，在系统浏览器中完成登录和只读日历授权。每个账号重复一次。
 
 客户端采用 loopback 回调和 PKCE。不要上传账号密码、浏览器 Cookie 或 Codex/Claude 令牌。
-Google Testing 模式的 refresh token 可能过期；出现授权失效时重新连接对应账号。
+Google Testing 模式下，日历授权和 refresh token 会在 7 天后失效。长期个人使用需要把 Google 应用状态改为 **In production**，再为每个账号重新授权一次，取得新续期凭据。[Google 状态规则](https://support.google.com/cloud/answer/15549945)、[个人使用免验证条件](https://support.google.com/cloud/answer/13464323?hl=en)。
+
+In production 不代表上架 Marketplace 或公开本机数据，但 Google 授权入口不再受测试用户名单限制。仅供本人使用时，可在私有的 `.local/google.json` 中设置 `allowedAccounts`，每项包含既有账号的 Google `id`（userinfo `sub`）和 `email`。本机会校验两个字段及新授权的邮箱验证状态，拒绝其他身份；这项限制只作用于本机操作台，不是 Google 侧的邮箱白名单。不要把个人账号列表或 OAuth 配置提交到仓库。
+
+从测试模式迁移时，私有配置 `requireNewRefreshToken: true` 可要求每次重新授权必须收到新 refresh token，缺失时保留原连接。成功取得的新凭据记录收到时间；正常使用时自动刷新并保存返回的更新凭据。用户撤销或组织策略变化仍可能要求重登。
 本项目不会创建、修改或删除任何日历事件。
 
 ## 本地运行与开发

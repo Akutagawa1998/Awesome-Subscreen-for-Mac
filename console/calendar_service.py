@@ -41,7 +41,22 @@ class CalendarService:
     def public_config(self):
         data = self.storage.read()
         return {'configured': bool(data.get('googleClient')),
-                'accounts': [{'id': a['id'], 'email': a['email']} for a in data.get('accounts', [])]}
+                'ownerOnly': 'allowedAccounts' in data,
+                'accounts': [{'id': a['id'], 'email': a['email']} for a in data.get('accounts', [])
+                             if self.account_allowed(a, data)]}
+
+    def account_allowed(self, account, data=None):
+        # This restricts this local console, not Google's external OAuth audience.
+        data = self.storage.read() if data is None else data
+        if 'allowedAccounts' not in data:
+            return True
+        allowed = data['allowedAccounts']
+        email = str(account.get('email') or '').strip().casefold()
+        ident = account.get('id')
+        if not isinstance(allowed, list) or not ident or not email:
+            return False
+        return any(isinstance(a, dict) and a.get('id') == ident
+                   and str(a.get('email') or '').strip().casefold() == email for a in allowed)
 
     def configure(self, value):
         # Accept downloaded Desktop OAuth JSON, not browser cookies or account passwords.
@@ -71,35 +86,52 @@ class CalendarService:
             pending = self.pending.pop(state, None)
         if not pending or time.time() - pending['created'] > 600:
             raise ValueError('授权请求已过期，请从操作台重新连接')
-        client = self.storage.read()['googleClient']
+        config = self.storage.read()
+        client = config['googleClient']
         tokens = self.fetch('https://oauth2.googleapis.com/token', {
             **client, 'grant_type': 'authorization_code', 'code': code,
             'redirect_uri': self.origin + '/oauth/callback', 'code_verifier': pending['verifier']})
         granted = set(tokens.get('scope', '').split())
         if 'https://www.googleapis.com/auth/calendar.readonly' not in granted:
             raise ValueError('未授予日历读取权限，请重新连接并选择授权日历')
+        if config.get('requireNewRefreshToken') and not tokens.get('refresh_token'):
+            raise ValueError('Google 未返回新的自动续期凭据，原连接已保留，请重新授权')
         info = self.fetch('https://www.googleapis.com/oauth2/v3/userinfo', token=tokens['access_token'])
         account = {'id': info['sub'], 'email': info.get('email', 'Google account'),
                    'access_token': tokens['access_token'], 'refresh_token': tokens.get('refresh_token'),
-                   'expires_at': time.time() + tokens.get('expires_in', 3600)}
+                   'expires_at': time.time() + tokens.get('expires_in', 3600),
+                   'authorized_at': time.time()}
+        if 'allowedAccounts' in config and info.get('email_verified') is not True:
+            raise ValueError('请使用经过 Google 验证的本人账号')
+        if not self.account_allowed(account, config):
+            raise ValueError('此操作台只允许已绑定的本人 Google 账号')
         def save(data):
             accounts = data.setdefault('accounts', [])
             old = next((a for a in accounts if a['id'] == account['id']), {})
             account['refresh_token'] = account['refresh_token'] or old.get('refresh_token')
+            if tokens.get('refresh_token'):
+                account['refresh_token_received_at'] = time.time()
+            elif old.get('refresh_token_received_at'):
+                account['refresh_token_received_at'] = old['refresh_token_received_at']
             data['accounts'] = [a for a in accounts if a['id'] != account['id']] + [account]
-        self.storage.update(save)
-
-    def token(self, account):
         with self.lock:
-            account = next((a for a in self.storage.read().get('accounts', []) if a['id'] == account['id']), account)
-            if account['expires_at'] > time.time() + 60:
+            self.storage.update(save)
+
+    def token(self, account, force_refresh=False):
+        with self.lock:
+            data = self.storage.read()
+            account = next((a for a in data.get('accounts', []) if a['id'] == account['id']), account)
+            if not self.account_allowed(account, data):
+                raise ValueError('此操作台只允许已绑定的本人 Google 账号')
+            if not force_refresh and account['expires_at'] > time.time() + 60:
                 return account['access_token']
             if not account.get('refresh_token'):
                 raise ValueError('账号需要重新授权')
-            data = self.storage.read()
             result = self.fetch('https://oauth2.googleapis.com/token', {
                 **data['googleClient'], 'grant_type': 'refresh_token', 'refresh_token': account['refresh_token']})
             account.update(access_token=result['access_token'], expires_at=time.time() + result.get('expires_in', 3600))
+            if result.get('refresh_token'):
+                account.update(refresh_token=result['refresh_token'], refresh_token_received_at=time.time())
             def update(d):
                 for a in d.get('accounts', []):
                     if a['id'] == account['id']:
@@ -118,7 +150,8 @@ class CalendarService:
         raise ValueError('日历记录过多，请缩小日期范围')
 
     def events(self, start, end):
-        accounts = self.storage.read().get('accounts', [])
+        data = self.storage.read()
+        accounts = [a for a in data.get('accounts', []) if self.account_allowed(a, data)]
         events, calendars, errors = [], [], []
         colors = ['#b8d7be', '#dfb991', '#aebddf', '#d2b3d9', '#e0bd7a']
         for index, account in enumerate(accounts):

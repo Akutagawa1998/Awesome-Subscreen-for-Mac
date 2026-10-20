@@ -177,7 +177,7 @@ async function openSettings(){
 }
 function renderSettings(){
   const accounts=googleConfig.accounts;
-  $('#settings-content').innerHTML=`<p>每个 Google 账号单独授权。日程只读，每条日程显示所属账号。</p>
+  $('#settings-content').innerHTML=`<p>${googleConfig.ownerOnly?'仅限已绑定的本人 Google 账号。':'每个 Google 账号单独授权。'}日程只读，每条日程显示所属账号。</p>
     ${accounts.map(a=>`<div class="account-row"><span class="account-email"><i class="account-badge"></i>${esc(a.email)}</span><button class="soft small" data-disconnect="${esc(a.id)}">断开</button></div>`).join('')}
     ${googleConfig.configured?'<button class="primary" id="add-google">＋ 添加 Google 账号</button>':`<div class="notice">首次连接需要 Google Cloud 的「桌面应用」OAuth 配置。启用 Calendar API 后下载 JSON，在这里导入一次。</div><label class="file-label">导入 OAuth 配置 JSON<input id="google-file" type="file" accept=".json,application/json"></label><a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">打开 Google Cloud 凭据设置 ↗</a>`}
     <div class="notice">账号授权保存在本机。断开只会移除操作台里的连接，不会删除 Google 日历或日程。</div>`;
