@@ -1,7 +1,8 @@
-"""Small JSON-RPC client for Codex's official local WebSocket transport.
+"""Codex JSON-RPC bridge with a read-only CLI fallback.
 
-Uses the existing daemon. Never starts an agent, resumes threads automatically,
-or changes Codex configuration. Thread attachment and replies are explicit UI actions.
+The existing control socket supports explicit attachment and approval actions.
+When its default location is unavailable, an owned CLI subprocess only reads
+local thread metadata and history. Neither transport resumes threads automatically.
 """
 import base64
 import hashlib
@@ -9,15 +10,37 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import socket
 import struct
+import subprocess
 import threading
 import time
+
+
+READ_ONLY_METHODS = frozenset({
+    'initialize', 'initialized', 'thread/list', 'thread/read',
+    'thread/items/list', 'thread/turns/list',
+    'account/rateLimits/read', 'account/usage/read',
+})
+
+
+class CodexRpcError(RuntimeError):
+    def __init__(self, error):
+        super().__init__(error.get('message', 'Codex request failed'))
+        self.code = error.get('code')
 
 
 class UnixWebSocket:
     def __init__(self, path):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self._handshake(path)
+        except Exception:
+            self.close()
+            raise
+
+    def _handshake(self, path):
         self.sock.settimeout(5)
         self.sock.connect(str(path))
         self.lock = threading.Lock()
@@ -104,10 +127,79 @@ class UnixWebSocket:
         self.sock.close()
 
 
+class LocalStdioTransport:
+    """An owned app-server process, restricted before anything reaches stdin."""
+    def __init__(self):
+        executable = shutil.which('codex')
+        if not executable:
+            candidate = Path.home() / '.local/bin/codex'
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                executable = str(candidate)
+        if not executable:
+            raise FileNotFoundError('未找到 Codex CLI，请安装或配置 PATH')
+        self.lock = threading.Lock()
+        self.close_lock = threading.Lock()
+        self.closed = False
+        self.process = subprocess.Popen(
+            [executable, 'app-server', '--stdio'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def send(self, message):
+        if message.get('method') not in READ_ONLY_METHODS:
+            raise ValueError('本地只读连接不支持此操作，请在 Codex 中处理')
+        payload = json.dumps(message, ensure_ascii=False).encode() + b'\n'
+        with self.lock:
+            if self.closed or self.process.poll() is not None:
+                raise ConnectionError('Codex 本地只读连接已关闭')
+            self.process.stdin.write(payload)
+            self.process.stdin.flush()
+
+    def receive(self):
+        line = self.process.stdout.readline(32 * 1024 * 1024 + 1)
+        if not line:
+            raise ConnectionError('Codex 本地只读连接已关闭')
+        if len(line) > 32 * 1024 * 1024:
+            raise ConnectionError('Codex message too large')
+        return json.loads(line)
+
+    def close(self):
+        with self.close_lock:
+            if self.closed:
+                return
+            self.closed = True
+            # Only this Popen child is owned here; never find or signal a daemon.
+            try:
+                if self.process.poll() is None:
+                    try:
+                        self.process.terminate()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        self.process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            self.process.kill()
+                        except ProcessLookupError:
+                            pass
+                        self.process.wait(timeout=2)
+                else:
+                    self.process.wait(timeout=2)
+            finally:
+                for stream in (self.process.stdin, self.process.stdout):
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+
+
 class CodexBridge:
     def __init__(self):
         self.ws = None
         self.connected = False
+        self.connection_mode = None
+        self._connection_generation = 0
         self.error = None
         self.pending = {}
         self.requests = {}
@@ -115,29 +207,88 @@ class CodexBridge:
         self.counter = 0
         self.lock = threading.RLock()
         self.connect_lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def connection_generation(self):
+        with self.lock:
+            return self._connection_generation
+
+    def _open_transport(self):
+        configured = os.environ.get('WOKYIS_CODEX_SOCKET')
+        if configured is not None:
+            return UnixWebSocket(configured), 'control'
+        path = Path.home() / '.codex/app-server-control/app-server-control.sock'
+        try:
+            return UnixWebSocket(path), 'control'
+        except (FileNotFoundError, ConnectionRefusedError):
+            return LocalStdioTransport(), 'local_readonly'
 
     def connect(self):
         with self.connect_lock:
-            if self.connected:
-                return
-            path = os.environ.get('WOKYIS_CODEX_SOCKET') or Path.home() / '.codex/app-server-control/app-server-control.sock'
-            ws = UnixWebSocket(path)
-            self.ws = ws
-            self.connected = True
-            self.pending.clear()
-            self.attached.clear()
-            threading.Thread(target=self._read, args=(ws,), daemon=True).start()
+            with self.lock:
+                if self._closed:
+                    raise ConnectionError('Codex bridge 已关闭')
+                if self.connected:
+                    return
+            ws, mode = self._open_transport()
             try:
-                self.call('initialize', {
+                with self.lock:
+                    if self._closed:
+                        raise ConnectionError('Codex bridge 已关闭')
+                    self.ws = ws
+                    self.connection_mode = mode
+                    self._connection_generation += 1
+                    self.pending.clear()
+                    self.attached.clear()
+                threading.Thread(target=self._read, args=(ws,), daemon=True).start()
+                # Initialization must not recursively enter connect(), and no
+                # other caller can use this transport before it is ready.
+                self._request(ws, 'initialize', {
                     'clientInfo': {'name': 'wokyis_console', 'title': 'Wokyis Console', 'version': '1.0.0'},
                     'capabilities': {'experimentalApi': True,
                                      'optOutNotificationMethods': ['item/agentMessage/delta', 'item/reasoning/textDelta', 'item/commandExecution/outputDelta']}})
                 ws.send({'method': 'initialized', 'params': {}})
-                self.error = None
+                with self.lock:
+                    if self.ws is not ws or self._closed:
+                        raise ConnectionError('Codex disconnected')
+                    self.connected = True
+                    self.error = None
             except Exception:
-                self.connected = False
-                ws.close()
+                self._disconnect(ws)
                 raise
+
+    def _disconnect(self, ws):
+        with self.lock:
+            if self.ws is ws:
+                self.ws = None
+                self.connected = False
+                self.connection_mode = None
+                self.error = 'Codex 连接中断，正在重连'
+                self.pending.clear()
+                self.attached.clear()
+            for owner, q in self.requests.values():
+                if owner is ws:
+                    q.put(ConnectionError('Codex disconnected'))
+        ws.close()
+
+    def close(self):
+        """Permanently close this bridge and its own transport; safe to repeat."""
+        with self.lock:
+            self._closed = True
+            ws = self.ws
+            self.connected = False
+            self.connection_mode = None
+            self.pending.clear()
+            self.attached.clear()
+        if ws is not None:
+            self._disconnect(ws)
+        # A factory may still own a newly spawned process before publishing it
+        # as self.ws. Keep the caller alive until connect() closes that process.
+        with self.connect_lock:
+            pass
+        with self.lock:
+            self.error = 'Codex 连接已关闭'
 
     def _read(self, ws):
         try:
@@ -145,42 +296,52 @@ class CodexBridge:
                 m = ws.receive()
                 if 'id' in m and 'method' not in m:
                     with self.lock:
-                        q = self.requests.get(m['id'])
-                    if q:
-                        q.put(m)
+                        entry = self.requests.get(m['id'])
+                        if entry and entry[0] is ws:
+                            entry[1].put(m)
                 elif 'id' in m and 'method' in m:
                     # Keep exact request IDs, including their original JSON type.
                     with self.lock:
-                        self.pending[str(m['id'])] = {**m, 'receivedAt': time.time(), 'sending': False}
+                        if self.ws is ws and self.connection_mode == 'control':
+                            self.pending[str(m['id'])] = {**m, 'receivedAt': time.time(), 'sending': False}
                 elif m.get('method') == 'serverRequest/resolved':
                     with self.lock:
-                        self.pending.pop(str(m.get('params', {}).get('requestId')), None)
+                        if self.ws is ws:
+                            self.pending.pop(str(m.get('params', {}).get('requestId')), None)
         except Exception:
-            if self.ws is ws:
-                self.connected = False
-                self.error = 'Codex 连接中断，正在重连'
-                with self.lock:
-                    self.pending.clear()
-                    self.attached.clear()
-                    for q in self.requests.values():
-                        q.put({'error': {'message': 'Codex disconnected'}})
-            ws.close()
+            self._disconnect(ws)
 
     def call(self, method, params=None, timeout=15):
         if not self.connected:
             self.connect()
         with self.lock:
+            ws = self.ws
+            if self.connection_mode == 'local_readonly' and method not in READ_ONLY_METHODS:
+                raise ValueError('本地只读连接不支持此操作，请在 Codex 中处理')
+        return self._request(ws, method, params, timeout)
+
+    def _request(self, ws, method, params=None, timeout=15):
+        with self.lock:
+            if self._closed or ws is None or self.ws is not ws:
+                raise ConnectionError('Codex disconnected')
             self.counter += 1
             ident = self.counter
             q = queue.Queue()
-            self.requests[ident] = q
+            self.requests[ident] = (ws, q)
         try:
-            self.ws.send({'id': ident, 'method': method, 'params': params or {}})
+            try:
+                ws.send({'id': ident, 'method': method, 'params': params or {}})
+            except Exception:
+                self._disconnect(ws)
+                raise
             m = q.get(timeout=timeout)
+            if isinstance(m, Exception):
+                raise m
             if 'error' in m:
-                raise RuntimeError(m['error'].get('message', 'Codex request failed'))
+                raise CodexRpcError(m['error'])
             return m.get('result', {})
         except queue.Empty:
+            self._disconnect(ws)
             raise TimeoutError('Codex 响应超时') from None
         finally:
             with self.lock:
@@ -188,8 +349,17 @@ class CodexBridge:
 
     def attach(self, thread_id):
         # No prompt, policy override, model override, or turn/start here.
-        result = self.call('thread/resume', {'threadId': thread_id})
-        self.attached.add(thread_id)
+        if not self.connected:
+            self.connect()
+        with self.lock:
+            if self.connection_mode == 'local_readonly':
+                raise ValueError('本地只读连接不支持附加，请在 Codex 中处理')
+            ws = self.ws
+        result = self._request(ws, 'thread/resume', {'threadId': thread_id})
+        with self.lock:
+            if self.ws is not ws or not self.connected:
+                raise ConnectionError('Codex disconnected')
+            self.attached.add(thread_id)
         return result
 
     def approvals(self, thread_id=None):
@@ -197,8 +367,12 @@ class CodexBridge:
             return [dict(x) for x in self.pending.values()
                     if thread_id is None or x.get('params', {}).get('threadId') == thread_id]
 
-    def respond(self, request_id, thread_id, decision=None, answers=None):
+    def respond(self, request_id, thread_id, decision=None, answers=None, expected_generation=None):
         with self.lock:
+            if expected_generation is not None and expected_generation != self._connection_generation:
+                raise ValueError('连接已变化，请重新查看审批请求')
+            if self.connection_mode == 'local_readonly':
+                raise ValueError('本地只读连接不支持审批，请在 Codex 中处理')
             p = self.pending.get(str(request_id))
             if not self.connected or not p or p.get('sending'):
                 raise ValueError('请求已处理或已失效，请刷新')

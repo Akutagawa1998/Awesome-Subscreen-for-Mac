@@ -188,7 +188,8 @@ function renderSettings(){
 $('#settings-dialog').addEventListener('close',()=>loadCalendar());
 window.addEventListener('focus',()=>{if(currentPage===PAGE.calendar)loadCalendar();});
 
-function statusInfo(thread) {
+function statusInfo(thread, unavailable=false) {
+  if(unavailable)return {label:'运行状态未知',key:'unknown'};
   const s=thread.status || {}, flags=s.activeFlags || [];
   if(flags.includes('waitingOnApproval'))return {label:'需要批准',key:'waiting'};
   if(flags.includes('waitingOnUserInput'))return {label:'等待回复',key:'waiting'};
@@ -200,13 +201,15 @@ function statusInfo(thread) {
 function threadName(t){return t.name || (t.preview || '').split('\n')[0].slice(0,80) || '未命名会话';}
 function renderStatus(){
   if(!statusData)return;
-  $('#codex-connection').textContent=statusData.connected?'本地已连接':'连接中断';
+  const readonly=statusData.connectionMode==='local_readonly', live=statusData.connected&&!statusData.stale&&!readonly;
+  $('#codex-connection').textContent=statusData.connected?(readonly?'本机只读连接':'本地已连接'):'连接中断';
   $('#codex-connection').classList.toggle('online',statusData.connected);
   const hidden=new Set(statusData.hidden||[]), threads=(statusData.threads||[]).filter(t=>!hidden.has(t.id));
   $('#hidden-count').textContent=hidden.size;
   let buckets=Object.values(statusData.limits?.rateLimitsByLimitId || {});
   if(!buckets.length && statusData.limits?.rateLimits)buckets=[statusData.limits.rateLimits];
   const bucket=buckets.find(b=>b.limitId==='codex')||buckets[0];
+  $('#usage-source').textContent=readonly?'终端 Codex 账号':'账户用量';
   $('#plan-name').textContent=(bucket?.planType||'CODEX').toUpperCase();
   const windows=bucket?[bucket.primary,bucket.secondary].filter(Boolean):[];
   let usage=windows.map(w=>{
@@ -222,21 +225,24 @@ function renderStatus(){
   usage+=`<div class="token-line"><span>${dailyRow?'今日':display?display.startDate.slice(5):'最近每日'} tokens</span><strong>${compact(display?.tokens)}</strong></div>`;
   if(!windows.length)usage='<div class="muted">额度暂不可用</div>'+usage;
   $('#codex-usage').innerHTML=usage;
-  const active=threads.filter(t=>statusInfo(t).key==='active').length, waiting=threads.filter(t=>statusInfo(t).key==='waiting').length, unknown=threads.filter(t=>statusInfo(t).key==='unknown').length;
+  const active=live?threads.filter(t=>statusInfo(t).key==='active').length:'—', waiting=live?threads.filter(t=>statusInfo(t).key==='waiting').length:'—', unknown=live?threads.filter(t=>statusInfo(t).key==='unknown').length:threads.length;
   $('#session-counts').innerHTML=`<span><strong>${active}</strong>运行</span><span class="waiting"><strong>${waiting}</strong>待处理</span><span><strong>${unknown}</strong>未知</span>`;
-  $('#session-coverage').textContent=`本机 ${threads.length}${statusData.truncated?'+':''} 个`;
-  threads.sort((a,b)=>{const order={waiting:0,active:1,error:2,idle:3,unknown:4};return order[statusInfo(a).key]-order[statusInfo(b).key]||(b.updatedAt-a.updatedAt);});
-  $('#session-list').innerHTML=threads.length?threads.map(t=>{const s=statusInfo(t);return `<div class="session-row ${selectedThread===t.id?'chosen':''}"><button class="session-select" data-session="${esc(t.id)}"><span class="session-title">${esc(threadName(t))}</span><span class="session-status status-${s.key}"><i class="status-dot"></i>${s.label}</span></button><button class="hide-session" data-hide="${esc(t.id)}" aria-label="仅从操作台隐藏 ${esc(threadName(t))}" title="仅从操作台隐藏">×</button></div>`;}).join(''):'<div class="notice">这里还没有会话。隐藏的会话可以随时恢复。</div>';
+  const cached=statusData.stale||!statusData.connected;
+  const lastUpdate=statusData.fetchedAt?new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(statusData.fetchedAt*1000)):null;
+  $('#session-coverage').textContent=cached?`缓存${lastUpdate?' · '+lastUpdate:''}`:`本机 ${threads.length}${statusData.truncated?'+':''} 个`;
+  threads.sort((a,b)=>{const order={waiting:0,active:1,error:2,idle:3,unknown:4};return order[statusInfo(a,!live).key]-order[statusInfo(b,!live).key]||(b.updatedAt-a.updatedAt);});
+  $('#session-list').innerHTML=threads.length?threads.map(t=>{const s=statusInfo(t,!live);return `<div class="session-row ${selectedThread===t.id?'chosen':''}"><button class="session-select" data-session="${esc(t.id)}"><span class="session-title">${esc(threadName(t))}</span><span class="session-status status-${s.key}"><i class="status-dot"></i>${s.label}</span></button><button class="hide-session" data-hide="${esc(t.id)}" aria-label="仅从操作台隐藏 ${esc(threadName(t))}" title="仅从操作台隐藏">×</button></div>`;}).join(''):`<div class="notice">${cached?'正在连接 Codex，请稍后刷新。':'这里还没有会话。隐藏的会话可以随时恢复。'}</div>`;
   if(statusData.error && !selectedThread)$('#agent-detail').innerHTML=`<div class="empty"><h2>暂时无法连接</h2><p>${esc(statusData.error)}</p><p>可以先使用时钟和日历。</p></div>`;
   if(selectedThread && hidden.has(selectedThread)){selectedThread=null;detailData=null;detailKey='';$('#agent-detail').innerHTML='<div class="empty"><h2>已从操作台隐藏</h2><p>会话仍保留在 Codex 和 ChatGPT 中。</p></div>';}
-  if(activeApproval && !statusData.approvals.some(p=>String(p.id)===String(activeApproval.id))){
+  if(detailData&&selectedThread&&(!live||detailData.connectionMode!==statusData.connectionMode||detailData.connectionGeneration!==statusData.connectionGeneration))renderDetail();
+  if(activeApproval && (!live||activeApproval.connectionGeneration!==statusData.connectionGeneration||!(statusData.approvals||[]).some(p=>String(p.id)===String(activeApproval.id)))){
     $('#approval-dialog').close(); activeApproval=null; toast('请求已处理或已失效');
   }
 }
 async function refreshStatus(){
   if(statusBusy)return;statusBusy=true;
   try{statusData=await api('/api/status');renderStatus();if(selectedThread && currentPage===PAGE.codex)await loadDetail(selectedThread,false);}
-  catch{ $('#codex-connection').textContent='服务未连接';$('#codex-connection').classList.remove('online');}
+  catch{if(statusData){statusData={...statusData,connected:false,stale:true,limits:null,usage:null,error:'操作台服务未连接'};renderStatus();}else{$('#codex-connection').textContent='服务未连接';$('#codex-connection').classList.remove('online');}}
   finally{statusBusy=false;}
 }
 $('#refresh-codex').addEventListener('click',refreshStatus);
@@ -249,13 +255,16 @@ async function loadDetail(id,showLoading){
   const request=++activeThreadFetch;
   if(showLoading)$('#agent-detail').innerHTML='<div class="empty"><p>正在读取会话…</p></div>';
   try{const data=await api(`/api/thread?id=${encodeURIComponent(id)}`);if(selectedThread!==id||request!==activeThreadFetch)return;detailData=data;renderDetail();}
-  catch(e){if(selectedThread===id&&showLoading)$('#agent-detail').innerHTML=`<div class="empty"><p>${esc(e.message)}</p><a class="button primary" href="codex://threads/${esc(id)}">在 Codex 中打开 ↗</a></div>`;}
+  catch(e){if(selectedThread!==id||request!==activeThreadFetch)return;if(showLoading)$('#agent-detail').innerHTML=`<div class="empty"><p>${esc(e.message)}</p><a class="button primary" href="codex://threads/${esc(id)}">在 Codex 中打开 ↗</a></div>`;else if(detailData){detailData={...detailData,connected:false,stale:true,error:'会话连接中断，显示上次读取的内容'};renderDetail();}}
 }
 function renderDetail(){
-  const d=detailData,t=d.thread,s=statusInfo(t),owned=['active','idle'].includes(t.status?.type), pending=d.approvals || [];
-  const key=JSON.stringify(d);if(key===detailKey)return;
+  const d=detailData,t=d.thread,readonly=d.connectionMode==='local_readonly'||statusData?.connectionMode==='local_readonly';
+  const sameConnection=d.connectionGeneration===undefined||statusData?.connectionGeneration===undefined||d.connectionGeneration===statusData.connectionGeneration;
+  const available=sameConnection&&d.connected!==false&&!d.stale&&statusData?.connected!==false&&!statusData?.stale;
+  const owned=available&&!readonly&&['active','idle'].includes(t.status?.type), s=statusInfo(t,!available||readonly), pending=owned?(d.approvals||[]):[];
+  const key=JSON.stringify([d,available,readonly]);if(key===detailKey)return;
   // Don't interrupt typing or focus when background polling changes metadata.
-  if($('#agent-detail').contains(document.activeElement) && document.activeElement.matches('textarea'))return;
+  if(owned&&$('#agent-detail').contains(document.activeElement) && document.activeElement.matches('textarea'))return;
   detailKey=key;
   const recent=d.messages.find(m=>m.type==='agent') || d.messages[0];
   const latest=recent?.text || t.preview || '此会话暂无可用摘要。';
@@ -263,7 +272,7 @@ function renderDetail(){
     <div class="detail-body scroll">${pending.map(p=>`<div class="approval-card"><h3>${p.method==='item/tool/requestUserInput'?'有问题需要你回复':'有请求需要你批准'}</h3><p>${esc((p.params.reason||p.params.questions?.[0]?.question||p.params.command||'查看请求详情').slice(0,180))}</p><button class="primary" data-review="${esc(p.id)}">查看完整请求 →</button></div>`).join('')}
     <div><div class="summary-label">${recent?'最近消息':'会话起始内容'} · 可上下滚动</div><div class="summary">${esc(latest)}</div></div>
     <div class="model-line">${esc(t.model||'模型未知')}${t.reasoningEffort?' · '+esc(t.reasoningEffort):''} · 会话配置</div>
-    ${!owned?'<div class="notice">这个会话的实时状态由其他运行实例管理。请打开 Codex 查看运行状态、回复或审批。</div>':!d.attached?'<div class="notice">连接后可接收这个会话的审批和回复请求。</div>':''}
+    ${!available?'<div class="notice">连接已中断，显示上次读取的内容。请稍后刷新，或在 Codex 中处理。</div>':readonly?'<div class="notice">当前通过终端 Codex 只读连接。运行状态、回复和审批请在 Codex 中处理。</div>':!owned?'<div class="notice">这个会话的实时状态由其他运行实例管理。请打开 Codex 查看运行状态、回复或审批。</div>':!d.attached?'<div class="notice">连接后可接收这个会话的审批和回复请求。</div>':''}
     ${d.error?`<p class="muted">${esc(d.error)}</p>`:''}</div>
     ${owned?`<div class="reply-area"><textarea id="quick-reply" rows="2" aria-label="给此会话回复" placeholder="给这个会话回复…">${esc(replyDrafts[t.id]||'')}</textarea><button id="send-reply" class="primary">发送</button></div>`:''}
     <div class="detail-actions">${owned&&!d.attached?'<button id="attach-thread" class="soft">连接审批</button>':''}<a class="button soft" href="codex://threads/${esc(t.id)}">在 Codex 中打开 ↗</a></div>`;
@@ -273,7 +282,9 @@ function renderDetail(){
   $$('[data-review]').forEach(b=>b.addEventListener('click',()=>reviewApproval(pending.find(p=>String(p.id)===b.dataset.review))));
 }
 function reviewApproval(p){
-  if(!p)return;activeApproval=p;
+  if(!p)return;
+  const generation=detailData.connectionGeneration;
+  activeApproval={...p,connectionGeneration:generation};
   const params=p.params, method=p.method;
   const supported=['item/commandExecution/requestApproval','item/fileChange/requestApproval','item/permissions/requestApproval','item/tool/requestUserInput'].includes(method) &&
     (method!=='item/commandExecution/requestApproval' || params.command || params.networkApprovalContext);
@@ -293,7 +304,7 @@ function reviewApproval(p){
   }else{content+=`<a class="button primary" href="codex://threads/${esc(params.threadId)}">在 Codex 中处理 ↗</a>`;}
   $('#approval-content').innerHTML=content;$('#approval-dialog').showModal();
   $$('[data-choice]').forEach(b=>b.addEventListener('click',()=>{const q=b.closest('[data-question]');$('textarea',q).value=b.dataset.choice;$$('button',q).forEach(x=>x.classList.toggle('selected',x===b));}));
-  const respond=async (button,extra)=>perform(button,async()=>{await api('/api/approval',{requestId:p.id,threadId:params.threadId,...extra});$('#approval-dialog').close();activeApproval=null;toast('已提交，等待 Codex 确认');await refreshStatus();});
+  const respond=async (button,extra)=>perform(button,async()=>{await api('/api/approval',{requestId:p.id,threadId:params.threadId,connectionGeneration:generation,...extra});$('#approval-dialog').close();activeApproval=null;toast('已提交，等待 Codex 确认');await refreshStatus();});
   $('#allow-request')?.addEventListener('click',e=>respond(e.currentTarget,{decision:'accept'}));
   $('#deny-request')?.addEventListener('click',e=>respond(e.currentTarget,{decision:'decline'}));
   $('#answer-questions')?.addEventListener('click',e=>{const answers=Object.fromEntries($$('[data-question]').map(q=>[q.dataset.question,$('textarea',q).value.trim()]));if(Object.values(answers).some(v=>!v)){toast('请回答每个问题');return;}respond(e.currentTarget,{answers});});

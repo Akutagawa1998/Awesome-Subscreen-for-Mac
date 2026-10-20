@@ -9,12 +9,13 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import signal
 import threading
 import time
 from urllib.parse import urlparse, parse_qs
 
 from console.calendar_service import CalendarService
-from console.codex_bridge import CodexBridge
+from console.codex_bridge import CodexBridge, CodexRpcError
 from console.local_data import Storage, ClaudeUsage, local_thread_metadata
 from console.terminal_service import TerminalService
 from console.todo_service import TodoService
@@ -36,8 +37,17 @@ class App:
         self.terminals = TerminalService(ROOT / '.local')
         self.lock = threading.RLock()
         self.snapshot = {'connected': False, 'threads': [], 'limits': None, 'usage': None,
+                         'connectionMode': None, 'connectionGeneration': 0,
                          'fetchedAt': None, 'error': '正在连接 Codex…'}
         self.usage_time = 0
+
+    def codex_mode(self):
+        mode = getattr(self.codex, 'connection_mode', None)
+        return mode if mode in ('control', 'local_readonly') else None
+
+    def codex_source(self):
+        generation = getattr(self.codex, 'connection_generation', 0)
+        return self.codex_mode(), generation if isinstance(generation, int) else 0
 
     def poll(self):
         while True:
@@ -49,14 +59,20 @@ class App:
             time.sleep(8)
 
     def refresh(self):
-        threads, cursor = [], None
+        threads, cursor, source = [], None, None
         for _ in range(20):
-            page = self.codex.call('thread/list', {'limit': 100, 'sortKey': 'updated_at', 'useStateDbOnly': True, 'cursor': cursor})
+            page = self.codex.call('thread/list', {'limit': 100, 'sortKey': 'updated_at',
+                'sourceKinds': ['cli', 'vscode', 'appServer'], 'useStateDbOnly': True, 'cursor': cursor})
+            current_source = self.codex_source()
+            if source is not None and source != current_source:
+                raise ConnectionError('Codex connection changed while listing threads')
+            source = current_source
             threads += page.get('data', [])
             cursor = page.get('nextCursor')
             if not cursor:
                 break
         metadata = local_thread_metadata()
+        mode, generation = source
         rows = []
         for t in threads:
             if t.get('parentThreadId'):
@@ -66,8 +82,15 @@ class App:
                 'preview': (t.get('preview') or '')[:240],
                 'tokens': meta.get('tokens_used'), 'model': t.get('model') or meta.get('model'),
                 'reasoningEffort': t.get('reasoningEffort') or meta.get('reasoning_effort')})
+            if mode == 'local_readonly':
+                rows[-1]['status'] = {'type': 'notLoaded'}
         with self.lock:
-            self.snapshot.update(connected=True, threads=rows, fetchedAt=time.time(), error=None, stale=False, truncated=bool(cursor))
+            if (self.snapshot.get('connectionMode'), self.snapshot.get('connectionGeneration', 0)) != source:
+                # Quotas from two app-server accounts must never share a cache.
+                self.snapshot.update(limits=None, usage=None, usageErrors=None, usageFetchedAt=None)
+                self.usage_time = 0
+            self.snapshot.update(connected=True, connectionMode=mode, connectionGeneration=generation, threads=rows,
+                                 fetchedAt=time.time(), error=None, stale=False, truncated=bool(cursor))
         if time.time() - self.usage_time > 60:
             limits, usage, errors = None, None, []
             for method, key in [('account/rateLimits/read', 'limits'), ('account/usage/read', 'usage')]:
@@ -80,6 +103,11 @@ class App:
                         usage = result
                 except Exception:
                     errors.append(key)
+                if self.codex_source() != source or not self.codex.connected:
+                    with self.lock:
+                        self.snapshot.update(limits=None, usage=None, usageFetchedAt=None)
+                        self.usage_time = 0
+                    raise ConnectionError('Codex connection changed while reading usage')
             with self.lock:
                 self.snapshot.update(limits=limits, usage=usage, usageErrors=errors, usageFetchedAt=time.time())
             self.usage_time = time.time()
@@ -87,15 +115,31 @@ class App:
     def status(self):
         with self.lock:
             result = dict(self.snapshot)
+        mode, generation = self.codex_source()
+        if not self.codex.connected or (result.get('connectionMode'), result.get('connectionGeneration', 0)) != (mode, generation):
+            result.update(connected=False, stale=True, limits=None, usage=None,
+                          error='Codex 本地连接已断开，正在重连')
+        result.update(connectionMode=mode, connectionGeneration=generation)
+        if not result.get('connected'):
+            result.update(limits=None, usage=None)
+        live = result.get('connected') and not result.get('stale') and mode != 'local_readonly'
+        if not live:
+            result['threads'] = [dict(t, status={'type': 'notLoaded'}) for t in result.get('threads', [])]
         result['hidden'] = self.store.read().get('hidden', [])
-        result['approvals'] = self.codex.approvals()
-        result['attached'] = list(self.codex.attached)
+        result['approvals'] = self.codex.approvals() if live else []
+        result['attached'] = list(self.codex.attached) if live else []
         return result
 
     def thread(self, ident):
         if not UUID.fullmatch(ident):
             raise ValueError('无效会话 ID')
-        r = self.codex.call('thread/read', {'threadId': ident})
+        try:
+            r = self.codex.call('thread/read', {'threadId': ident})
+        except (OSError, TimeoutError) as e:
+            raise RuntimeError('Codex 本地连接暂不可用，请稍后刷新') from e
+        except CodexRpcError as e:
+            raise RuntimeError('此会话暂时无法读取，请刷新或在 Codex 中打开') from e
+        read_source = self.codex_source()
         thread = r['thread']
         items, error = [], None
         try:
@@ -114,16 +158,32 @@ class App:
                 cursor = r.get('nextCursor')
                 if any(i['type'] == 'agent' for i in items) or not cursor:
                     break
+        except CodexRpcError as e:
+            error = '当前 Codex 版本不支持历史摘要' if e.code == -32601 else '历史消息暂时读取失败，请刷新重试'
+        except (OSError, TimeoutError):
+            error = 'Codex 连接中断，下面是已读取的内容，请刷新重试'
         except Exception:
-            error = '此会话暂不提供历史摘要'
-        return {'thread': {k: thread.get(k) for k in ['id', 'name', 'preview', 'status', 'cwd', 'model', 'reasoningEffort']},
-                'messages': items, 'error': error, 'approvals': self.codex.approvals(ident),
-                'attached': ident in self.codex.attached}
+            error = '历史消息暂时读取失败，请刷新重试'
+        mode, generation = self.codex_source()
+        changed = (mode, generation) != read_source
+        live = self.codex.connected and not changed and mode != 'local_readonly'
+        public_thread = {k: thread.get(k) for k in ['id', 'name', 'preview', 'status', 'cwd', 'model', 'reasoningEffort']}
+        if not live:
+            public_thread['status'] = {'type': 'notLoaded'}
+        return {'thread': public_thread, 'connectionMode': mode, 'connectionGeneration': generation,
+                'connected': self.codex.connected,
+                'stale': changed or not self.codex.connected,
+                'messages': items, 'error': error, 'approvals': self.codex.approvals(ident) if live else [],
+                'attached': live and ident in self.codex.attached}
 
     def owning_thread(self, ident):
         if not UUID.fullmatch(ident):
             raise ValueError('无效会话 ID')
+        if self.codex_mode() == 'local_readonly':
+            raise ValueError('当前是本机只读连接，请在 Codex 中回复或审批')
         r = self.codex.call('thread/read', {'threadId': ident})['thread']
+        if self.codex_mode() == 'local_readonly':
+            raise ValueError('当前是本机只读连接，请在 Codex 中回复或审批')
         if r.get('status', {}).get('type') not in ('active', 'idle'):
             raise ValueError('该会话不由当前本地服务运行，请在 Codex 中打开后处理')
         return r
@@ -182,7 +242,11 @@ class App:
                 self.codex.call('turn/start', params)
             return {'ok': True}
         if path == '/api/approval':
-            return self.codex.respond(data.get('requestId'), data.get('threadId'), data.get('decision'), data.get('answers'))
+            generation = data.get('connectionGeneration')
+            if type(generation) is not int:
+                raise ValueError('请刷新后重新查看审批请求')
+            return self.codex.respond(data.get('requestId'), data.get('threadId'), data.get('decision'),
+                                      data.get('answers'), expected_generation=generation)
         if path == '/api/google/configure':
             self.calendar.configure(data)
             return {'ok': True}
@@ -311,6 +375,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
+    def terminate(_signum, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, terminate)
     app = App(args.port)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.daemon_threads = True
@@ -322,6 +389,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        app.codex.close()
         app.terminals.detach_all()
         server.server_close()
 
